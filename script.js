@@ -1,5 +1,5 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.3.0/firebase-app.js";
-import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy } from "https://www.gstatic.com/firebasejs/11.3.0/firebase-firestore.js";
+import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy, limit } from "https://www.gstatic.com/firebasejs/11.3.0/firebase-firestore.js";
 
 // ==========================================
 // FIREBASE CONFIGURATION
@@ -42,7 +42,7 @@ class LetterManager {
     initRealtimeListener() {
         // Escuchar cambios en tiempo real en la colección 'letters'
         // Ordenadas por fecha descendente (más nuevas primero)
-        const q = query(collection(db, "letters"), orderBy("date", "desc"));
+        const q = query(collection(db, "letters"), orderBy("date", "desc"), limit(100));
 
         this.unsubscribe = onSnapshot(q, (snapshot) => {
             this.letters = snapshot.docs.map(doc => ({
