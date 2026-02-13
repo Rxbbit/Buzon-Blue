@@ -1,60 +1,108 @@
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.3.0/firebase-app.js";
+import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy } from "https://www.gstatic.com/firebasejs/11.3.0/firebase-firestore.js";
+
+// ==========================================
+// FIREBASE CONFIGURATION
+// ==========================================
+const firebaseConfig = {
+    apiKey: "AIzaSyBunpuwWjk1T63YTj9bZAeiISmRdGyGfh4",
+    authDomain: "buzonblue-573a5.firebaseapp.com",
+    projectId: "buzonblue-573a5",
+    storageBucket: "buzonblue-573a5.firebasestorage.app",
+    messagingSenderId: "642713028077",
+    appId: "1:642713028077:web:3e595b404bca80ff1513e4"
+};
+
+// Initialize Firebase
+let app, db;
+try {
+    app = initializeApp(firebaseConfig);
+    db = getFirestore(app);
+} catch (e) {
+    console.error("Error inicializando Firebase. Asegúrate de configurar las credenciales.", e);
+}
+
 // ==========================================
 // DATA MANAGEMENT
 // ==========================================
 
-const ADMIN_PASSWORD = 'ChaterinaAzuleja17'; // Change this for production
+const ADMIN_PASSWORD = 'ChaterinaAzuleja17';
 
 class LetterManager {
-    constructor() {
-        this.letters = this.loadLetters();
+    constructor(onLettersUpdated) {
+        this.letters = [];
+        this.onLettersUpdated = onLettersUpdated;
+        this.unsubscribe = null;
+
+        if (db) {
+            this.initRealtimeListener();
+        }
     }
 
-    loadLetters() {
-        const stored = localStorage.getItem('buzonBlueLetters');
-        return stored ? JSON.parse(stored) : [];
+    initRealtimeListener() {
+        // Escuchar cambios en tiempo real en la colección 'letters'
+        // Ordenadas por fecha descendente (más nuevas primero)
+        const q = query(collection(db, "letters"), orderBy("date", "desc"));
+
+        this.unsubscribe = onSnapshot(q, (snapshot) => {
+            this.letters = snapshot.docs.map(doc => ({
+                id: doc.id, // Firestore ID (string)
+                ...doc.data()
+            }));
+
+            // Notificar a la app que hay nuevos datos
+            if (this.onLettersUpdated) {
+                this.onLettersUpdated(this.letters);
+            }
+        }, (error) => {
+            console.error("Error escuchando cartas:", error);
+            // Si falla (ej. permisos o config incorrecta), avisar
+            if (error.code === 'permission-denied') {
+                alert("Error de permisos: Asegúrate de que Firestore esté en 'Test Mode' o configura las reglas de seguridad.");
+            } else if (error.code === 'failed-precondition') {
+                // A veces pasa si falta un índice, pero para esto no debería
+                console.warn(error);
+            }
+        });
     }
 
-    saveLetters() {
-        localStorage.setItem('buzonBlueLetters', JSON.stringify(this.letters));
-    }
+    async addLetter(sender, message) {
+        if (!db) throw new Error("Firebase no está configurado");
 
-    addLetter(sender, message) {
         const letter = {
-            id: Date.now(),
             sender: sender || 'Anónimo',
             message: message,
             date: new Date().toISOString(),
             read: false,
             reviewed: false
         };
-        this.letters.push(letter);
-        this.saveLetters();
-        return letter;
+
+        // Guardar en Firestore
+        const docRef = await addDoc(collection(db, "letters"), letter);
+        return { id: docRef.id, ...letter };
     }
 
     getLetter(id) {
-        return this.letters.find(letter => letter.id === parseInt(id));
+        return this.letters.find(letter => letter.id === id);
     }
 
-    markAsRead(id) {
-        const letter = this.getLetter(id);
-        if (letter) {
-            letter.read = true;
-            this.saveLetters();
-        }
+    async markAsRead(id) {
+        if (!db) return;
+        const letterRef = doc(db, "letters", id);
+        await updateDoc(letterRef, { read: true });
+        // No necesitamos actualizar this.letters manualmente, onSnapshot lo hará
     }
 
-    markAsReviewed(id) {
-        const letter = this.getLetter(id);
-        if (letter) {
-            letter.reviewed = true;
-            this.saveLetters();
-        }
+    async markAsReviewed(id) {
+        if (!db) return;
+        const letterRef = doc(db, "letters", id);
+        await updateDoc(letterRef, { reviewed: true });
     }
 
-    deleteLetter(id) {
-        this.letters = this.letters.filter(letter => letter.id !== parseInt(id));
-        this.saveLetters();
+    async deleteLetter(id) {
+        if (!db) return;
+        const letterRef = doc(db, "letters", id);
+        await deleteDoc(letterRef);
     }
 
     getStats() {
@@ -71,7 +119,14 @@ class LetterManager {
 
 class BuzonApp {
     constructor() {
-        this.letterManager = new LetterManager();
+        // Pasar callback para actualizar la UI cuando cambien los datos
+        this.letterManager = new LetterManager(() => {
+            this.updateStats();
+            if (this.currentView === 'admin') {
+                this.renderLetters();
+            }
+        });
+
         this.currentView = 'user';
         this.currentLetterId = null;
         this.isLoggedIn = false;
@@ -79,7 +134,7 @@ class BuzonApp {
         this.initElements();
         this.initEventListeners();
         this.initTheme();
-        this.updateStats();
+        // updateStats se llamará automáticamente cuando carguen los datos
     }
 
     initElements() {
@@ -216,7 +271,7 @@ class BuzonApp {
     // LETTER MANAGEMENT
     // ==========================================
 
-    handleSendLetter() {
+    async handleSendLetter() {
         const sender = this.senderName.value.trim();
         const message = this.letterMessage.value.trim();
 
@@ -225,24 +280,33 @@ class BuzonApp {
             return;
         }
 
+        // Mostrar estado de carga
+        const originalBtnText = this.sendLetterBtn.innerHTML;
+        this.sendLetterBtn.disabled = true;
+        this.sendLetterBtn.innerHTML = '<span>Enviando...</span>';
+
         try {
-            this.letterManager.addLetter(sender, message);
+            await this.letterManager.addLetter(sender, message);
 
             // Clear form
             this.senderName.value = '';
             this.letterMessage.value = '';
 
-            // Update stats
+            // Update stats (handled by listener, but good to ensure)
             this.updateStats();
 
             // Show success animation
             this.showSuccessMessage();
         } catch (error) {
-            if (error.name === 'QuotaExceededError') {
-                alert('El almacenamiento está lleno. Por favor, limpia las cartas antiguas desde el panel de administrador.');
+            console.error(error);
+            if (error.message.includes("Firebase")) {
+                alert('Error de configuración: Faltan las claves de Firebase en el código.');
             } else {
                 alert('Error al enviar la carta: ' + error.message);
             }
+        } finally {
+            this.sendLetterBtn.disabled = false;
+            this.sendLetterBtn.innerHTML = originalBtnText;
         }
     }
 
@@ -276,7 +340,8 @@ class BuzonApp {
 
     renderLetters() {
         this.lettersGrid.innerHTML = '';
-        const letters = [...this.letterManager.letters].reverse(); // Show newest first
+        // letters están ordenadas por Firebase, no necesitamos reverse si usamos orderBy('date', 'desc')
+        const letters = this.letterManager.letters;
 
         if (letters.length === 0) {
             this.lettersGrid.innerHTML = `
@@ -293,6 +358,7 @@ class BuzonApp {
             // Add 'pending-review' class if not reviewed
             const reviewClass = letter.reviewed ? 'reviewed' : 'pending-review';
             card.className = `letter-card ${letter.read ? 'read' : ''} ${reviewClass}`;
+            // Use string ID safely
             card.dataset.id = letter.id;
 
             // Simplified envelope look - Only Sender Name
@@ -300,7 +366,7 @@ class BuzonApp {
                 <div class="envelope-flap"></div>
                 <div class="envelope-content">
                     <div class="stamp-small">📮</div>
-                    <h3 class="envelope-sender">${letter.sender}</h3>
+                    <h3 class="envelope-sender">${letter.sender || 'Anónimo'}</h3>
                 </div>
             `;
 
@@ -315,7 +381,7 @@ class BuzonApp {
 
         if (!letter) return;
 
-        this.modalSender.textContent = `De: ${letter.sender}`;
+        this.modalSender.textContent = `De: ${letter.sender || 'Anónimo'}`;
         this.modalDate.textContent = new Date(letter.date).toLocaleString('es-ES', {
             day: 'numeric',
             month: 'long',
@@ -325,9 +391,6 @@ class BuzonApp {
         });
         this.modalMessage.textContent = letter.message;
 
-        // Remove image handling logic as it's being deleted
-        if (this.modalImage) this.modalImage.style.display = 'none';
-
         // Update reviewed badge
         if (letter.reviewed) {
             this.reviewedBadge.innerHTML = '<span class="reviewed-badge-large">✓ Revisada por moderador</span>';
@@ -335,6 +398,14 @@ class BuzonApp {
             this.reviewedBadge.innerHTML = '<span class="pending-badge-large">⏳ Pendiente de revisión</span>';
         }
 
+        // Update read button state
+        this.updateModalButtons(letter);
+
+        this.letterModal.classList.add('active');
+        document.body.style.overflow = 'hidden';
+    }
+
+    updateModalButtons(letter) {
         // Update read button state
         if (letter.read) {
             this.markReadBtn.innerHTML = `
@@ -378,9 +449,6 @@ class BuzonApp {
             this.markReviewedBtn.disabled = false;
             this.markReviewedBtn.style.opacity = '1';
         }
-
-        this.letterModal.classList.add('active');
-        document.body.style.overflow = 'hidden';
     }
 
     closeLetterModal() {
@@ -389,58 +457,46 @@ class BuzonApp {
         this.currentLetterId = null;
     }
 
-    handleMarkAsRead() {
+    async handleMarkAsRead() {
         if (!this.currentLetterId) return;
+        const originalText = this.markReadBtn.innerHTML;
+        this.markReadBtn.innerHTML = 'Guardando...';
 
-        this.letterManager.markAsRead(this.currentLetterId);
+        await this.letterManager.markAsRead(this.currentLetterId);
 
-        // Update modal button
-        this.markReadBtn.innerHTML = `
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="20 6 9 17 4 12"/>
-            </svg>
-            Ya marcada como leída
-        `;
-        this.markReadBtn.disabled = true;
-        this.markReadBtn.style.opacity = '0.5';
-
-        // Update grid and stats
-        this.renderLetters();
-        this.updateStats();
+        // UI updates automatically via listener
+        // But for modal button, we might want instant feedback if we kept the modal open?
+        // Actually the listener will fire and we aren't re-rendering the modal content automatically unless we trigger it.
+        // Let's manually update buttons for better UX responsiveness
+        const letter = this.letterManager.getLetter(this.currentLetterId);
+        if (letter) {
+            letter.read = true; // Optimistic update
+            this.updateModalButtons(letter);
+        }
     }
 
-    handleMarkAsReviewed() {
+    async handleMarkAsReviewed() {
         if (!this.currentLetterId) return;
+        const originalText = this.markReviewedBtn.innerHTML;
+        this.markReviewedBtn.innerHTML = 'Guardando...';
 
-        this.letterManager.markAsReviewed(this.currentLetterId);
+        await this.letterManager.markAsReviewed(this.currentLetterId);
 
-        // Update modal button
-        this.markReviewedBtn.innerHTML = `
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
-                <polyline points="22 4 12 14.01 9 11.01"/>
-            </svg>
-            Ya marcada como revisada
-        `;
-        this.markReviewedBtn.disabled = true;
-        this.markReviewedBtn.style.opacity = '0.5';
-
-        // Update badge
-        this.reviewedBadge.innerHTML = '<span class="reviewed-badge-large">✓ Revisada por moderador</span>';
-
-        // Update grid and stats
-        this.renderLetters();
-        this.updateStats();
+        const letter = this.letterManager.getLetter(this.currentLetterId);
+        if (letter) {
+            letter.reviewed = true;
+            this.updateModalButtons(letter);
+            this.reviewedBadge.innerHTML = '<span class="reviewed-badge-large">✓ Revisada por moderador</span>';
+        }
     }
 
-    handleDeleteLetter() {
+    async handleDeleteLetter() {
         if (!this.currentLetterId) return;
 
         if (confirm('¿Estás seguro de que quieres eliminar esta carta?')) {
-            this.letterManager.deleteLetter(this.currentLetterId);
+            await this.letterManager.deleteLetter(this.currentLetterId);
             this.closeLetterModal();
-            this.renderLetters();
-            this.updateStats();
+            // grid updates via listener
         }
     }
 
@@ -476,34 +532,20 @@ class BuzonApp {
 // INITIALIZE APP
 // ==========================================
 
-// Add success message animation styles
+// Add success message animation styles (Reuse existing)
 const style = document.createElement('style');
 style.textContent = `
     @keyframes popIn {
-        0% {
-            transform: translate(-50%, -50%) scale(0);
-            opacity: 0;
-        }
-        50% {
-            transform: translate(-50%, -50%) scale(1.1);
-        }
-        100% {
-            transform: translate(-50%, -50%) scale(1);
-            opacity: 1;
-        }
+        0% { transform: translate(-50%, -50%) scale(0); opacity: 0; }
+        50% { transform: translate(-50%, -50%) scale(1.1); }
+        100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
     }
     
     @keyframes fadeOut {
-        to {
-            opacity: 0;
-            transform: translate(-50%, -50%) scale(0.8);
-        }
+        to { opacity: 0; transform: translate(-50%, -50%) scale(0.8); }
     }
     
-    .input-field.error {
-        animation: shake 0.5s ease;
-        border-color: #ff4757 !important;
-    }
+    .input-field.error { animation: shake 0.5s ease; border-color: #ff4757 !important; }
     
     @keyframes shake {
         0%, 100% { transform: translateX(0); }
@@ -514,7 +556,8 @@ style.textContent = `
 document.head.appendChild(style);
 
 // Initialize app when DOM is ready
-let buzonApp;
 document.addEventListener('DOMContentLoaded', () => {
-    buzonApp = new BuzonApp();
+    // No necesitamos asignar a window porque estamos en un módulo
+    // Pero si quieres depurar:
+    window.buzonApp = new BuzonApp();
 });
